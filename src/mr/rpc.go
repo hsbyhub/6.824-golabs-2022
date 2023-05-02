@@ -25,48 +25,43 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
-type ReqMapArgs struct {
+type GetMapReq struct {
 	Worker int
 }
 
-type ReqMapReply struct {
+type GetMapRsp struct {
 	FileName   string
 	BuketCount int
 }
 
-type RspMapArgs struct {
+type PostMapReq struct {
 	Worker           int
 	FileName         string
 	BuketFileNameMap map[int]string
 	Err              error
 }
 
-type RspMapReply struct {
+type PostMapRsp struct {
+	OK bool
 }
 
-type ReqReduceArgs struct {
+type GetReduceReq struct {
 	Worker int
 }
 
-type ReqReduceReply struct {
+type GetReduceRsp struct {
 	Buket     int
 	FileNames []string
 }
 
-type RspReduceArgs struct {
+type PostReduceReq struct {
 	Worker int
 	Buket  int
 	Err    error
 }
 
-type RspReduceReply struct {
-}
-
-type IsDoneArgs struct {
-}
-
-type IsDoneReply struct {
-	IsDone bool
+type PostReduceRsp struct {
+	OK bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name

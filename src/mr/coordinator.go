@@ -43,11 +43,11 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to callCoordinator.
-func (c *Coordinator) ReqMap(args *ReqMapArgs, reply *ReqMapReply) error {
+func (c *Coordinator) OnGetMap(req *GetMapReq, rsp *GetMapRsp) error {
 	c.MapTasks.Range(func(key, value any) bool {
 		task, ok := value.(*MapTask)
 		if !ok {
-			log.Fatal("coordinator reqmap convert task fail")
+			log.Fatal("coordinator on get map convert task fail")
 			return false
 		}
 		task.Mu.Lock()
@@ -55,11 +55,11 @@ func (c *Coordinator) ReqMap(args *ReqMapArgs, reply *ReqMapReply) error {
 		if task.Status == TaskStatusNew || (task.Status == TaskStatusHandle && task.WorkExpire < time.Now().Unix()) {
 			// 更新状态
 			task.Status = TaskStatusHandle
-			task.Worker = args.Worker
+			task.Worker = req.Worker
 			task.WorkExpire = time.Now().Unix() + 10
 
-			reply.FileName = task.FileName
-			reply.BuketCount = c.BuketCount
+			rsp.FileName = task.FileName
+			rsp.BuketCount = c.BuketCount
 			return false
 		}
 		return true
@@ -68,43 +68,50 @@ func (c *Coordinator) ReqMap(args *ReqMapArgs, reply *ReqMapReply) error {
 	return nil
 }
 
-func (c *Coordinator) RspMap(args *RspMapArgs, reply *RspMapReply) error {
-	v, ok := c.MapTasks.Load(args.FileName)
+func (c *Coordinator) OnPostMap(req *PostMapReq, rsp *PostMapRsp) error {
+	v, ok := c.MapTasks.Load(req.FileName)
 	if !ok {
-		return fmt.Errorf("coordinator rspmap filename[%v] not found", args.FileName)
+		return fmt.Errorf("coordinator on post map filename[%v] not found", req.FileName)
 	}
 	task, ok := v.(*MapTask)
 	if !ok {
-		return fmt.Errorf("coordinator rspmap convert task fail")
+		return fmt.Errorf("coordinator on post map convert task fail")
 	}
 	task.Mu.Lock()
 	defer task.Mu.Unlock()
 
+	if req.Err != nil {
+		task.Status = TaskStatusNew
+		task.Worker = 0
+		task.WorkExpire = 0
+		return nil
+	}
+
 	// 检查
 	if task.Status != TaskStatusHandle {
-		return fmt.Errorf("coordinator rspmap status[%v] illegal", task.Status)
+		return fmt.Errorf("coordinator on post map status[%v] illegal", task.Status)
 	}
-	if task.Worker != args.Worker {
-		return fmt.Errorf("coordinator rspmap worker illegal, maybe expire and distributed to other worker")
+	if task.Worker != req.Worker {
+		return fmt.Errorf("coordinator on post map worker illegal, maybe expire and distributed to other worker")
 	}
-	for buket, _ := range args.BuketFileNameMap {
+	for buket, _ := range req.BuketFileNameMap {
 		v, ok := c.ReduceTasks.Load(buket)
 		if !ok {
-			return fmt.Errorf("coordinator rspmap buket reduce task not found")
+			return fmt.Errorf("coordinator on post map buket reduce task not found")
 		}
 		reduceTask, ok := v.(*ReduceTask)
 		if !ok {
-			return fmt.Errorf("coordinator rspmap buket reduce task convert fail")
+			return fmt.Errorf("coordinator on post map buket reduce task convert fail")
 		}
 		reduceTask.Mu.Lock()
 		if reduceTask.Status != TaskStatusNew {
-			return fmt.Errorf("coordinator rspmap buket reduce task status not new")
+			return fmt.Errorf("coordinator on post map buket reduce task status not new")
 		}
 		reduceTask.Mu.Unlock()
 	}
 
 	// 设置
-	for buket, fileName := range args.BuketFileNameMap {
+	for buket, fileName := range req.BuketFileNameMap {
 		v, _ := c.ReduceTasks.Load(buket)
 		reduceTask := v.(*ReduceTask)
 		reduceTask.Mu.Lock()
@@ -112,18 +119,20 @@ func (c *Coordinator) RspMap(args *RspMapArgs, reply *RspMapReply) error {
 		reduceTask.Mu.Unlock()
 	}
 	task.Status = TaskStatusDone
+	rsp.OK = true
 
 	return nil
 }
 
-func (c *Coordinator) ReqReduce(args *ReqReduceArgs, reply *ReqReduceReply) error {
-	if !c.IsMapDone() {
-		return fmt.Errorf("map not done")
+func (c *Coordinator) OnGetReduce(req *GetReduceReq, rsp *GetReduceRsp) error {
+	if !c.isMapDone() {
+		return nil
 	}
+
 	c.ReduceTasks.Range(func(key, value any) bool {
 		task, ok := value.(*ReduceTask)
 		if !ok {
-			log.Fatal("coordinator reqreduce convert task fail")
+			log.Fatal("coordinator on get reduce convert task fail")
 			return true
 		}
 
@@ -132,11 +141,11 @@ func (c *Coordinator) ReqReduce(args *ReqReduceArgs, reply *ReqReduceReply) erro
 		if task.Status == TaskStatusNew || (task.Status == TaskStatusHandle && task.WorkExpire < time.Now().Unix()) {
 			// 更新状态
 			task.Status = TaskStatusHandle
-			task.Worker = args.Worker
+			task.Worker = req.Worker
 			task.WorkExpire = time.Now().Unix() + 10
 
-			reply.Buket = task.Buket
-			reply.FileNames = task.FileNames
+			rsp.Buket = task.Buket
+			rsp.FileNames = task.FileNames
 			return false
 		}
 		return true
@@ -145,34 +154,37 @@ func (c *Coordinator) ReqReduce(args *ReqReduceArgs, reply *ReqReduceReply) erro
 	return nil
 }
 
-func (c *Coordinator) RspReduce(args *RspReduceArgs, reply *RspReduceReply) error {
-	v, ok := c.ReduceTasks.Load(args.Buket)
+func (c *Coordinator) OnPostReduce(req *PostReduceReq, rsp *PostReduceRsp) error {
+	v, ok := c.ReduceTasks.Load(req.Buket)
 	if !ok {
-		return fmt.Errorf("coordinator rspreduce buket[%v] not found", args.Buket)
+		return fmt.Errorf("coordinator on post reduce buket[%v] not found", req.Buket)
 	}
 	task, ok := v.(*ReduceTask)
 	if !ok {
-		return fmt.Errorf("coordinator rspreduce convert task fail")
+		return fmt.Errorf("coordinator on post reduce convert task fail")
 	}
 	task.Mu.Lock()
 	defer task.Mu.Unlock()
 
+	if req.Err != nil {
+		task.Status = TaskStatusNew
+		task.Worker = 0
+		task.WorkExpire = 0
+		return nil
+	}
+
 	// 检查
 	if task.Status != TaskStatusHandle {
-		return fmt.Errorf("coordinator rspreduce status[%v] illegal", task.Status)
+		return fmt.Errorf("coordinator on post reduce status[%v] illegal", task.Status)
 	}
-	if task.Worker != args.Worker {
-		return fmt.Errorf("coordinator rspreduce worker illegal, maybe expire and distributed to other worker")
+	if task.Worker != req.Worker {
+		return fmt.Errorf("coordinator on post reduce worker illegal, maybe expire and distributed to other worker")
 	}
 
 	// 设置
 	task.Status = TaskStatusDone
+	rsp.OK = true
 
-	return nil
-}
-
-func (c *Coordinator) IsDone(args *IsDoneArgs, reply *IsDoneReply) error {
-	reply.IsDone = c.Done()
 	return nil
 }
 
@@ -198,7 +210,7 @@ func (c *Coordinator) server() {
 	go http.Serve(l, nil)
 }
 
-func (c *Coordinator) IsMapDone() bool {
+func (c *Coordinator) isMapDone() bool {
 	ret := true
 	c.MapTasks.Range(func(key, value any) bool {
 		task, ok := value.(*MapTask)
@@ -218,7 +230,7 @@ func (c *Coordinator) IsMapDone() bool {
 	return ret
 }
 
-func (c *Coordinator) IsReduceDone() bool {
+func (c *Coordinator) isReduceDone() bool {
 	ret := true
 	c.ReduceTasks.Range(func(key, value any) bool {
 		task, ok := value.(*ReduceTask)
@@ -241,7 +253,7 @@ func (c *Coordinator) IsReduceDone() bool {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	return c.IsReduceDone()
+	return c.isReduceDone()
 }
 
 // create a Coordinator.

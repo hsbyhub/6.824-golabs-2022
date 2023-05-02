@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"time"
 )
 import "log"
 import "net/rpc"
@@ -41,34 +40,26 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	worker := os.Getpid()
 	for {
-		time.Sleep(100 * time.Millisecond)
 		// map
-		var reqMapArgs = ReqMapArgs{Worker: worker}
-		var reqMapReply ReqMapReply
-		err := callCoordinator("Coordinator.ReqMap", &reqMapArgs, &reqMapReply)
-		if err == nil && len(reqMapReply.FileName) > 0 {
+		var reqMapArgs = GetMapReq{Worker: worker}
+		var reqMapReply GetMapRsp
+		err := callCoordinator("Coordinator.OnGetMap", &reqMapArgs, &reqMapReply)
+		if err != nil {
+			break
+		}
+		if len(reqMapReply.FileName) > 0 {
 			mapWork(worker, reqMapReply.FileName, reqMapReply.BuketCount, mapf)
 		}
 
 		// reduce
-		var reqReduceArgs = ReqReduceArgs{Worker: worker}
-		var reqReduceReply ReqReduceReply
-		err = callCoordinator("Coordinator.ReqReduce", &reqReduceArgs, &reqReduceReply)
-		if err == nil && len(reqReduceReply.FileNames) > 0 {
-			reduceWork(worker, reqReduceReply.Buket, reqReduceReply.FileNames, reducef)
-		}
-
-		// is done
-		var isDoneArgs IsDoneArgs
-		var isDoneReply IsDoneReply
-		err = callCoordinator("Coordinator.IsDone", &isDoneArgs, &isDoneReply)
+		var reqReduceArgs = GetReduceReq{Worker: worker}
+		var reqReduceReply GetReduceRsp
+		err = callCoordinator("Coordinator.OnGetReduce", &reqReduceArgs, &reqReduceReply)
 		if err != nil {
-			log.Printf("worker[%v] call isdone error[%v]", err)
-			continue
-		}
-		if isDoneReply.IsDone {
-			//log.Printf("worker[%v] recive done and exit", worker)
 			break
+		}
+		if len(reqReduceReply.FileNames) > 0 {
+			reduceWork(worker, reqReduceReply.Buket, reqReduceReply.FileNames, reducef)
 		}
 	}
 
@@ -78,13 +69,35 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 func mapWork(worker int, fileName string, buketCount int, mapFunc func(string, string) []KeyValue) {
-	buketFileNameMap, err := mapFile(worker, fileName, buketCount, mapFunc)
+	kvs, err := mapFile(worker, fileName, buketCount, mapFunc)
 	if err != nil {
 		log.Printf("worker[%v] map file error[%v]", worker, err)
+		postMap(worker, fileName, err, nil)
+		return
 	}
-	err = mapRsp(worker, fileName, err, buketFileNameMap)
-	if err != nil {
-		log.Printf("worker[%v] call maprsp error[%v]", worker, err)
+
+	buketFileNameMap := map[int]string{}
+	buketFileMap := map[int]*os.File{}
+	for _, kv := range kvs {
+		buket := ihash(kv.Key) % buketCount
+
+		_, fileName := filepath.Split(fileName)
+		buketFileName := fmt.Sprintf("mr-buket-%s-%d", fileName, buket)
+		if _, ok := buketFileMap[buket]; !ok {
+			var buketFile *os.File
+			buketFile, err = os.Create(buketFileName)
+			if err != nil {
+				break
+			}
+			buketFileNameMap[buket] = buketFileName
+			buketFileMap[buket] = buketFile
+		}
+
+		fmt.Fprintf(buketFileMap[buket], "%v %v\n", kv.Key, kv.Value)
+	}
+
+	if !postMap(worker, fileName, err, buketFileNameMap) {
+		log.Printf("worker[%v] post map file[%v] fail", worker, fileName)
 
 		for _, v := range buketFileNameMap {
 			err := os.Remove(v)
@@ -95,7 +108,7 @@ func mapWork(worker int, fileName string, buketCount int, mapFunc func(string, s
 	}
 }
 
-func mapFile(worker int, fileName string, buketCount int, mapFunc func(string, string) []KeyValue) (map[int]string, error) {
+func mapFile(worker int, fileName string, buketCount int, mapFunc func(string, string) []KeyValue) ([]KeyValue, error) {
 	file, err := os.Open(fileName)
 	if err != nil {
 		return nil, err
@@ -105,38 +118,22 @@ func mapFile(worker int, fileName string, buketCount int, mapFunc func(string, s
 		return nil, err
 	}
 
-	buketFileNameMap := map[int]string{}
-	buketFileMap := map[int]*os.File{}
-	kvs := mapFunc(fileName, string(content))
-	for _, kv := range kvs {
-		buket := ihash(kv.Key) % buketCount
-
-		_, fileName := filepath.Split(fileName)
-		buketFileName := fmt.Sprintf("mr-buket-%s-%d", fileName, buket)
-		if _, ok := buketFileMap[buket]; !ok {
-			buketFile, err := os.Create(buketFileName)
-			if err != nil {
-				return nil, err
-			}
-			buketFileNameMap[buket] = buketFileName
-			buketFileMap[buket] = buketFile
-		}
-
-		fmt.Fprintf(buketFileMap[buket], "%v %v\n", kv.Key, kv.Value)
-	}
-
-	return buketFileNameMap, nil
+	return mapFunc(fileName, string(content)), nil
 }
 
-func mapRsp(worker int, fileName string, err error, buketFileNameMap map[int]string) error {
-	var rspMapArgs = RspMapArgs{
+func postMap(worker int, fileName string, err error, buketFileNameMap map[int]string) bool {
+	var rspMapArgs = PostMapReq{
 		Worker:           worker,
 		FileName:         fileName,
 		Err:              err,
 		BuketFileNameMap: buketFileNameMap,
 	}
-	var rspMapReply RspMapReply
-	return callCoordinator("Coordinator.RspMap", &rspMapArgs, &rspMapReply)
+	var rspMapReply PostMapRsp
+	err = callCoordinator("Coordinator.OnPostMap", &rspMapArgs, &rspMapReply)
+	if err != nil || !rspMapReply.OK {
+		return false
+	}
+	return true
 }
 
 func reduceWork(worker int, buket int, fileNames []string, reduceFunc func(string, []string) string) {
@@ -153,14 +150,13 @@ func reduceWork(worker int, buket int, fileNames []string, reduceFunc func(strin
 	defer outFile.Close()
 	fmt.Fprint(outFile, content)
 
-	err = reduceRsp(worker, buket, err)
-	if err != nil {
-		log.Printf("worker[%v] reduce buket[%v] rsp error[%v]", worker, buket, err)
-		os.Remove(outFileName)
-	} else {
+	if postReduce(worker, buket, err) {
 		for _, v := range fileNames {
 			os.Remove(v)
 		}
+	} else {
+		log.Printf("worker[%v] post reduce buket[%v] fail", worker, buket)
+		os.Remove(outFileName)
 	}
 }
 
@@ -210,14 +206,18 @@ func reduceFile(worker int, buket int, fileNames []string, reduceFunc func(strin
 	return content, nil
 }
 
-func reduceRsp(worker int, buket int, err error) error {
-	var rspReduceArgs = RspReduceArgs{
+func postReduce(worker int, buket int, err error) bool {
+	var rspReduceArgs = PostReduceReq{
 		Worker: worker,
 		Buket:  buket,
 		Err:    err,
 	}
-	var rspReduceReply RspReduceReply
-	return callCoordinator("Coordinator.RspReduce", &rspReduceArgs, &rspReduceReply)
+	var rspReduceReply PostReduceRsp
+	err = callCoordinator("Coordinator.OnPostReduce", &rspReduceArgs, &rspReduceReply)
+	if err != nil || !rspReduceReply.OK {
+		return false
+	}
+	return true
 }
 
 // example function to show how to make an RPC callCoordinator to the coordinator.
