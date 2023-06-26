@@ -1,13 +1,13 @@
 package mr
 
 import (
+	"6.824/util/logs"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 )
-import "log"
 import "net/rpc"
 import "hash/fnv"
 
@@ -69,9 +69,10 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 func mapWork(worker int, fileName string, buketCount int, mapFunc func(string, string) []KeyValue) {
+	logs.Info("worker[%v] begin map work", worker)
 	kvs, err := mapFile(worker, fileName, buketCount, mapFunc)
 	if err != nil {
-		log.Printf("worker[%v] map file error[%v]", worker, err)
+		logs.Error("worker[%v] map file error[%v]", worker, err)
 		postMap(worker, fileName, err, nil)
 		return
 	}
@@ -97,12 +98,12 @@ func mapWork(worker int, fileName string, buketCount int, mapFunc func(string, s
 	}
 
 	if !postMap(worker, fileName, err, buketFileNameMap) {
-		log.Printf("worker[%v] post map file[%v] fail", worker, fileName)
+		logs.Error("worker[%v] post map file[%v] fail", worker, fileName)
 
 		for _, v := range buketFileNameMap {
 			err := os.Remove(v)
 			if err != nil {
-				log.Printf("worker[%v] remove buket file[%v] error[%v]", worker, v, err)
+				logs.Error("worker[%v] remove buket file[%v] error[%v]", worker, v, err)
 			}
 		}
 	}
@@ -139,7 +140,7 @@ func postMap(worker int, fileName string, err error, buketFileNameMap map[int]st
 func reduceWork(worker int, buket int, fileNames []string, reduceFunc func(string, []string) string) {
 	content, err := reduceFile(worker, buket, fileNames, reduceFunc)
 	if err != nil {
-		log.Printf("worker[%v] reduce buket[%v] error[%v]", worker, buket, err)
+		logs.Error("worker[%v] reduce buket[%v] error[%v]", worker, buket, err)
 	}
 
 	outFileName := fmt.Sprintf("mr-out-%d", buket)
@@ -155,7 +156,7 @@ func reduceWork(worker int, buket int, fileNames []string, reduceFunc func(strin
 			os.Remove(v)
 		}
 	} else {
-		log.Printf("worker[%v] post reduce buket[%v] fail", worker, buket)
+		logs.Error("worker[%v] post reduce buket[%v] fail", worker, buket)
 		os.Remove(outFileName)
 	}
 }
