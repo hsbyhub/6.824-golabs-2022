@@ -471,7 +471,8 @@ func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, lastLogIndex int) {
 	defer logs.Debug("%v send append to server[%v] end", rf.toString(), server)
 	for {
 		rf.mu.RLock()
-		if rf.nextIndex[server] <= rf.matchIndex[server] {
+		if lastLogIndex >= rf.nextIndex[server]-1 &&
+			rf.nextIndex[server] <= rf.matchIndex[server] {
 			rf.mu.RUnlock()
 			break
 		}
