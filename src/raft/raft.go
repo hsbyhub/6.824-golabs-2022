@@ -466,12 +466,12 @@ func (rf *Raft) OnAppendEntries() {
 
 }
 
-func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, lastLogIndex int) {
+func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, index int) {
 	logs.Debug("%v send append to server[%v] begin", rf.toString(), server)
 	defer logs.Debug("%v send append to server[%v] end", rf.toString(), server)
 	for {
 		rf.mu.RLock()
-		if lastLogIndex >= rf.nextIndex[server]-1 &&
+		if index >= rf.nextIndex[server]-1 &&
 			rf.nextIndex[server] <= rf.matchIndex[server] {
 			rf.mu.RUnlock()
 			break
@@ -488,7 +488,7 @@ func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, lastLogIndex int) {
 			LeaderId:     rf.me,
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
-			Entries:      rf.logs[rf.nextIndex[server]-1 : lastLogIndex],
+			Entries:      rf.logs[rf.nextIndex[server]-1 : index],
 		}
 		rf.mu.RUnlock()
 
@@ -497,7 +497,7 @@ func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, lastLogIndex int) {
 		if !ok {
 			return
 		}
-		isContinue := rf.OnAppendEntriesHandleReply(server, cnt, lastLogIndex, &args, &reply)
+		isContinue := rf.OnAppendEntriesHandleReply(server, cnt, index, &args, &reply)
 		if !isContinue {
 			logs.Debug("%v send append to server[%v] break", rf.toString(), server)
 			break
@@ -510,7 +510,7 @@ func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, lastLogIndex int) {
 	}
 }
 
-func (rf *Raft) OnAppendEntriesHandleReply(server int, cnt *int, lastLogIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) OnAppendEntriesHandleReply(server int, cnt *int, index int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -534,8 +534,8 @@ func (rf *Raft) OnAppendEntriesHandleReply(server int, cnt *int, lastLogIndex in
 
 	// 复制成功
 	*cnt++
-	rf.nextIndex[server] = lastLogIndex + 1
-	rf.matchIndex[server] = lastLogIndex
+	rf.nextIndex[server] = index + 1
+	rf.matchIndex[server] = index
 
 	// 检查是否可以提交
 	if *cnt <= len(rf.peers)/2 {
@@ -544,8 +544,8 @@ func (rf *Raft) OnAppendEntriesHandleReply(server int, cnt *int, lastLogIndex in
 
 	// 提交
 	*cnt = -1
-	rf.commitIndex = lastLogIndex
-	logs.Debug("%v commit index[%v]", rf.toString(), lastLogIndex)
+	rf.commitIndex = index
+	logs.Debug("%v commit index[%v]", rf.toString(), index)
 	return false
 }
 
