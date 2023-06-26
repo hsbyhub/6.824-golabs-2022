@@ -20,9 +20,9 @@ package raft
 import (
 	"6.824/util/logs"
 	"fmt"
+	"github.com/sasha-s/go-deadlock"
 	"math/rand"
-	//	"bytes"
-	"sync"
+
 	"sync/atomic"
 	"time"
 
@@ -53,7 +53,7 @@ type ApplyMsg struct {
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        deadlock.RWMutex    // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -87,8 +87,8 @@ type Log struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 
 	var term int
 	var isleader bool
@@ -435,7 +435,7 @@ func (rf *Raft) OnElectionHandle(server int, cnt *int, args *RequestVoteArgs) {
 
 	logs.Debug("%v get vote[%v] election success", rf.toString(), *cnt)
 
-	// 选举成功, 初始化leader
+	// 选举成功, 初始化leader并周知其它服务
 	*cnt = -1
 	rf.role = RoleLeader
 	for i := range rf.peers {
@@ -446,8 +446,8 @@ func (rf *Raft) OnElectionHandle(server int, cnt *int, args *RequestVoteArgs) {
 }
 
 func (rf *Raft) OnAppendEntries() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 
 	if rf.role != RoleLeader {
 		return
@@ -470,9 +470,9 @@ func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, lastLogIndex int) {
 	logs.Debug("%v send append to server[%v] begin", rf.toString(), server)
 	defer logs.Debug("%v send append to server[%v] end", rf.toString(), server)
 	for {
-		rf.mu.Lock()
+		rf.mu.RLock()
 		if rf.nextIndex[server] <= rf.matchIndex[server] {
-			rf.mu.Unlock()
+			rf.mu.RUnlock()
 			break
 		}
 
@@ -489,7 +489,7 @@ func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, lastLogIndex int) {
 			PrevLogTerm:  prevLogTerm,
 			Entries:      rf.logs[rf.nextIndex[server]-1 : lastLogIndex],
 		}
-		rf.mu.Unlock()
+		rf.mu.RUnlock()
 
 		var reply AppendEntriesReply
 		ok := rf.sendAppendEntries(server, &args, &reply)
