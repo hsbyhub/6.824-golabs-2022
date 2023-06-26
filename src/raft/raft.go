@@ -74,6 +74,7 @@ type Raft struct {
 	lastApplied int
 	heartbeat   int64
 	leaderId    int
+	applyCh     chan ApplyMsg
 
 	// volatile on leader
 	nextIndex  []int
@@ -82,6 +83,7 @@ type Raft struct {
 
 type Log struct {
 	Term int
+	Cmd  interface{}
 }
 
 // return currentTerm and whether this server
@@ -192,6 +194,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 处理任期
 	reply.Term = rf.currentTerm
 	if args.Term > rf.currentTerm {
+		logs.Debug("%v request vote from[%v] found higher term[%v]", rf.toString(), args.CandidateId, args.Term)
 		rf.currentTerm = args.Term
 		rf.role = RoleFollower
 		rf.votedFor = -1
@@ -199,17 +202,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// 是否已经投票
 	if rf.votedFor != -1 {
+		logs.Debug("%v request vote from[%v] but voted for[%v]", rf.toString(), args.CandidateId, rf.votedFor)
 		return
 	}
 
 	// 检查任期
 	if args.Term < rf.currentTerm {
+		logs.Debug("%v request vote from[%v] but term lower", rf.toString(), args.CandidateId)
 		return
 	}
 
 	// 检查日志
-	if args.LastLogIndex < rf.lastLogIndex() ||
-		args.LastLogTerm < rf.lastLogTerm() {
+	if args.LastLogTerm < rf.lastLogTerm() ||
+		(args.LastLogTerm == rf.lastLogTerm() && args.LastLogIndex < rf.lastLogIndex()) {
+		logs.Debug("%v request vote from[%v] but log too old", rf.toString(), args.CandidateId)
 		return
 	}
 
@@ -245,6 +251,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 检查前一条日志是否存在
 	if args.PrevLogIndex > len(rf.logs) {
+		logs.Debug("%v append entries pre log index[%v] not found", rf.toString(), args.PrevLogIndex)
 		return
 	}
 
@@ -252,12 +259,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex-1].Term {
 		// 删除并返回错误
 		rf.logs = rf.logs[:args.PrevLogIndex-1]
+		logs.Debug("%v append entries pre log index[%v] term[%v] check fail", rf.toString(), args.PrevLogIndex, args.PrevLogTerm)
 		return
 	}
 
 	// 开始复制
 	reply.Ok = true
 	rf.logs = append(rf.logs[:args.PrevLogIndex], args.Entries...)
+	logs.Debug("%v append entries pre log index[%v] term[%v] append done", rf.toString(), args.PrevLogIndex, args.PrevLogTerm)
 
 	// 向后移动commit
 	if args.LeaderCommit > rf.commitIndex {
@@ -266,7 +275,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if lastLogIndex < commitIndex {
 			commitIndex = lastLogIndex
 		}
-		rf.commitIndex = commitIndex
+		for rf.commitIndex < commitIndex {
+			rf.commitIndex++
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logs[rf.commitIndex-1].Cmd,
+				CommandIndex: rf.commitIndex,
+			}
+		}
+		logs.Debug("%v commit index[%v]", rf.toString(), commitIndex)
 	}
 }
 
@@ -320,11 +337,24 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	index := -1
 	term := -1
 	isLeader := true
 
 	// Your code here (2B).
+	isLeader = rf.role == RoleLeader
+	if !isLeader {
+		return index, term, isLeader
+	}
+
+	rf.logs = append(rf.logs, &Log{
+		Term: rf.currentTerm,
+		Cmd:  command,
+	})
+	index = rf.lastLogIndex()
+	term = rf.lastLogTerm()
 
 	return index, term, isLeader
 }
@@ -357,20 +387,22 @@ func (rf *Raft) onTicker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		time.Sleep(time.Duration(150+rand.Intn(150)) * time.Millisecond)
-		go rf.OnElection()
-		go rf.OnAppendEntries()
+		go rf.OnElectionTicker()
+		go rf.OnAppendEntriesTicker()
 	}
 }
 
-func (rf *Raft) OnElection() {
+func (rf *Raft) OnElectionTicker() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	// 检查是否任期过期
 	if rf.role == RoleFollower && time.Now().UnixMilli() > rf.heartbeat+HearbeatTimeout {
 		rf.role = RoleCandidate
 		logs.Debug("%v check election timeout", rf.toString())
 	}
 
+	// 检查是否为candidate
 	if rf.role != RoleCandidate {
 		return
 	}
@@ -392,11 +424,11 @@ func (rf *Raft) OnElection() {
 		if server == rf.me {
 			continue
 		}
-		go rf.OnElectionHandle(server, &cnt, &args)
+		go rf.OnElectionToServer(server, &cnt, &args)
 	}
 }
 
-func (rf *Raft) OnElectionHandle(server int, cnt *int, args *RequestVoteArgs) {
+func (rf *Raft) OnElectionToServer(server int, cnt *int, args *RequestVoteArgs) {
 	var reply = &RequestVoteReply{}
 	ok := rf.sendRequestVote(server, args, reply)
 	if !ok {
@@ -404,12 +436,12 @@ func (rf *Raft) OnElectionHandle(server int, cnt *int, args *RequestVoteArgs) {
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	logs.Debug("%v on election handle server[%v] response", rf.toString(), server)
 
 	// 检查任期
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.role = RoleFollower
+		logs.Debug("%v request vote to server[%v] found higher term[%v]", rf.toString(), server, reply.Term)
 	}
 
 	// 角色和任期是否调整
@@ -426,6 +458,9 @@ func (rf *Raft) OnElectionHandle(server int, cnt *int, args *RequestVoteArgs) {
 	// 检查是否获得投票
 	if reply.VoteGranted {
 		*cnt++
+		logs.Debug("%v request vote to server[%v] succ", rf.toString(), server)
+	} else {
+		logs.Debug("%v request vote to server[%v] fail", rf.toString(), server)
 	}
 
 	// 检查是否足够票数
@@ -433,42 +468,38 @@ func (rf *Raft) OnElectionHandle(server int, cnt *int, args *RequestVoteArgs) {
 		return
 	}
 
-	logs.Debug("%v get vote[%v] election success", rf.toString(), *cnt)
-
 	// 选举成功, 初始化leader并周知其它服务
-	*cnt = -1
 	rf.role = RoleLeader
 	for i := range rf.peers {
 		rf.nextIndex[i] = rf.lastLogIndex() + 1
 		rf.matchIndex[i] = 0
 	}
-	go rf.OnAppendEntries()
+	logs.Debug("%v get vote[%v] election success", rf.toString(), *cnt)
+	*cnt = -1
+	go rf.OnAppendEntriesTicker()
 }
 
-func (rf *Raft) OnAppendEntries() {
+func (rf *Raft) OnAppendEntriesTicker() {
 	rf.mu.RLock()
 	defer rf.mu.RUnlock()
 
+	// 检查是否为leader
 	if rf.role != RoleLeader {
 		return
 	}
 
-	// 构造请求
-	lastLogIndex := rf.lastLogIndex()
-
+	// 向其他节点复制日志
 	cnt := 1
 	for server := range rf.peers {
 		if server == rf.me {
 			continue
 		}
-		go rf.OnAppendEntriesHandle(server, &cnt, lastLogIndex)
+		go rf.OnAppendEntriesToServer(server, &cnt, rf.lastLogIndex())
 	}
 
 }
 
-func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, index int) {
-	logs.Debug("%v send append to server[%v] begin", rf.toString(), server)
-	defer logs.Debug("%v send append to server[%v] end", rf.toString(), server)
+func (rf *Raft) OnAppendEntriesToServer(server int, cnt *int, index int) {
 	for {
 		rf.mu.RLock()
 		if index >= rf.nextIndex[server]-1 &&
@@ -489,6 +520,7 @@ func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, index int) {
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
 			Entries:      rf.logs[rf.nextIndex[server]-1 : index],
+			LeaderCommit: rf.commitIndex,
 		}
 		rf.mu.RUnlock()
 
@@ -497,12 +529,10 @@ func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, index int) {
 		if !ok {
 			return
 		}
-		isContinue := rf.OnAppendEntriesHandleReply(server, cnt, index, &args, &reply)
+		isContinue := rf.AppendEntriesToServerHandleReply(server, cnt, index, &args, &reply)
 		if !isContinue {
-			logs.Debug("%v send append to server[%v] break", rf.toString(), server)
 			break
 		}
-		logs.Debug("%v send append to server[%v] continue", rf.toString(), server)
 
 		rf.mu.Lock()
 		rf.nextIndex[server]--
@@ -510,7 +540,7 @@ func (rf *Raft) OnAppendEntriesHandle(server int, cnt *int, index int) {
 	}
 }
 
-func (rf *Raft) OnAppendEntriesHandleReply(server int, cnt *int, index int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) AppendEntriesToServerHandleReply(server int, cnt *int, index int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -543,9 +573,15 @@ func (rf *Raft) OnAppendEntriesHandleReply(server int, cnt *int, index int, args
 	}
 
 	// 提交
-	*cnt = -1
-	rf.commitIndex = index
-	logs.Debug("%v commit index[%v]", rf.toString(), index)
+	for rf.commitIndex < index {
+		rf.commitIndex++
+		rf.applyCh <- ApplyMsg{
+			CommandValid: true,
+			Command:      rf.logs[rf.commitIndex-1].Cmd,
+			CommandIndex: rf.commitIndex,
+		}
+	}
+	logs.Debug("%v append commit index[%v]", rf.toString(), index)
 	return false
 }
 
@@ -562,7 +598,7 @@ func (rf *Raft) lastLogTerm() int {
 }
 
 func (rf *Raft) toString() string {
-	return fmt.Sprintf("[%v] role[%v] term[%v] commit[%v]", rf.me, rf.role, rf.currentTerm, rf.commitIndex)
+	return fmt.Sprintf("SRV[%v]\tROLE[%v]\tTERM[%v]\tCOMMIT[%v]\t", rf.me, rf.role, rf.currentTerm, rf.commitIndex)
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -591,6 +627,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = RoleFollower
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.applyCh = applyCh
 
 	// volatile on leader
 	rf.nextIndex = make([]int, len(peers))
