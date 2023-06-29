@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"github.com/sasha-s/go-deadlock"
 	"math/rand"
+	"strings"
 
 	"sync/atomic"
 	"time"
@@ -615,7 +616,11 @@ func (rf *Raft) lastLogTerm() int {
 }
 
 func (rf *Raft) toString() string {
-	return fmt.Sprintf("SRV[%v]\tROLE[%v]\tTERM[%v]\tCOMMIT[%v]\t", rf.me, rf.role, rf.currentTerm, rf.commitIndex)
+	vs := make([]string, len(rf.logs))
+	for i, v := range rf.logs {
+		vs[i] = fmt.Sprintf("%v:%v:%v", i+1, v.Term, v.Cmd)
+	}
+	return fmt.Sprintf("SRV[%v]\tROLE[%v]\tTERM[%v]\tCOMMIT[%v]\tLOG[%v]\t", rf.me, rf.role, rf.currentTerm, rf.commitIndex, strings.Join(vs, ","))
 }
 
 // the service or tester wants to create a Raft server. the ports
