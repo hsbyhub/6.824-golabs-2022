@@ -18,7 +18,9 @@ package raft
 //
 
 import (
+	"6.824/labgob"
 	"6.824/util/logs"
+	"bytes"
 	"fmt"
 	"github.com/sasha-s/go-deadlock"
 	"math/rand"
@@ -106,33 +108,40 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
+	defer func() {
+		if rf.votedFor == 0 {
+			rf.votedFor = -1
+		}
+		if rf.logs == nil {
+			rf.logs = make([]*Log, 0)
+		}
+	}()
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if err := d.Decode(&rf.currentTerm); err != nil {
+		logs.Info("%v read persist raft.currentTerm error[%v]", rf.toString(), rf.currentTerm)
+	}
+	if err := d.Decode(&rf.votedFor); err != nil {
+		logs.Info("%v read persist raft.votedFor error[%v]", rf.toString(), rf.votedFor)
+	}
+	if err := d.Decode(&rf.logs); err != nil {
+		logs.Info("%v read persist raft.logs error[%v]", rf.toString(), rf.logs)
+	}
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -190,6 +199,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	// 处理任期
 	reply.Term = rf.currentTerm
@@ -228,6 +238,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	// 处理任期
 	reply.Term = rf.currentTerm
@@ -339,6 +350,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	index := -1
 	term := -1
 	isLeader := true
@@ -355,6 +367,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	})
 	index = rf.lastLogIndex()
 	term = rf.lastLogTerm()
+	go rf.OnAppendEntriesTicker()
 
 	return index, term, isLeader
 }
@@ -395,6 +408,7 @@ func (rf *Raft) onTicker() {
 func (rf *Raft) OnElectionTicker() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	// 检查是否任期过期
 	if rf.role == RoleFollower && time.Now().UnixMilli() > rf.heartbeat+HearbeatTimeout {
@@ -436,6 +450,7 @@ func (rf *Raft) OnElectionToServer(server int, cnt *int, args *RequestVoteArgs) 
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	// 检查任期
 	if reply.Term > rf.currentTerm {
@@ -536,6 +551,7 @@ func (rf *Raft) OnAppendEntriesToServer(server int, cnt *int, index int) {
 
 		rf.mu.Lock()
 		rf.nextIndex[server]--
+		rf.persist()
 		rf.mu.Unlock()
 	}
 }
@@ -543,6 +559,7 @@ func (rf *Raft) OnAppendEntriesToServer(server int, cnt *int, index int) {
 func (rf *Raft) AppendEntriesToServerHandleReply(server int, cnt *int, index int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	// 检查任期
 	if reply.Term > rf.currentTerm {
@@ -619,9 +636,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	// persist
-	rf.currentTerm = 0
-	rf.votedFor = -1
-	rf.logs = make([]*Log, 0)
+	//rf.currentTerm = 0
+	//rf.votedFor = -1
+	//rf.logs = make([]*Log, 0)
 
 	// volatile
 	rf.role = RoleFollower
