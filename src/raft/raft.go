@@ -502,7 +502,7 @@ func (rf *Raft) OnAppendEntriesTicker() {
 func (rf *Raft) OnAppendEntriesToServer(server int, cnt *int, index int) {
 	for {
 		rf.mu.RLock()
-		if index >= rf.nextIndex[server]-1 &&
+		if index < rf.nextIndex[server]-1 ||
 			rf.nextIndex[server] <= rf.matchIndex[server] {
 			rf.mu.RUnlock()
 			break
