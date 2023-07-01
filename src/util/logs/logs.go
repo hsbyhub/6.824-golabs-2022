@@ -36,7 +36,7 @@ func print(level Level, format string, vs ...interface{}) {
 	}
 	_, file, line, _ := runtime.Caller(2)
 	_, file = filepath.Split(file)
-	fmt.Println(fmt.Sprintf("%s\t%s\t%s:%d\t", levelStr[level], time.Now().Format("2006-01-02 15:04:05.000"), file, line) + fmt.Sprintf(format, vs...))
+	fmt.Println(fmt.Sprintf("%s\t%s\t%s:%d\t", levelStr[level], time.Now().Format("15:04:05.000"), file, line) + fmt.Sprintf(format, vs...))
 }
 
 func Debug(format string, vs ...interface{}) {

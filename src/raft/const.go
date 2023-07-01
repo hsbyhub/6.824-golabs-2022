@@ -12,7 +12,7 @@ const (
 type Role string
 
 const (
-	RoleFollower  = "follower"
-	RoleCandidate = "candidate"
-	RoleLeader    = "leader"
+	RoleFollower  = "F"
+	RoleCandidate = "C"
+	RoleLeader    = "L"
 )

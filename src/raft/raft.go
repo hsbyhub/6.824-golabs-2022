@@ -24,8 +24,6 @@ import (
 	"fmt"
 	"github.com/sasha-s/go-deadlock"
 	"math/rand"
-	"strings"
-
 	"sync/atomic"
 	"time"
 
@@ -181,6 +179,10 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+func (a *RequestVoteArgs) toString() string {
+	return fmt.Sprintf("Term[%v] Candidate[%v] LastLogIndex[%v] LastLogTerm[%v]", a.Term, a.CandidateId, a.LastLogIndex, a.LastLogTerm)
+}
+
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
@@ -188,6 +190,10 @@ type AppendEntriesArgs struct {
 	PrevLogTerm  int
 	Entries      []*Log
 	LeaderCommit int
+}
+
+func (a *AppendEntriesArgs) toString() string {
+	return fmt.Sprintf("Term[%v] Leader[%v] LeaderCommit[%v] PrevLogIndex[%v] PrevLogTerm[%v] LogCnt[%v]", a.Term, a.LeaderId, a.LeaderCommit, a.PrevLogIndex, a.PrevLogTerm, len(a.Entries))
 }
 
 type AppendEntriesReply struct {
@@ -205,7 +211,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 处理任期
 	reply.Term = rf.currentTerm
 	if args.Term > rf.currentTerm {
-		logs.Debug("%v request vote from[%v] found higher term[%v]", rf.toString(), args.CandidateId, args.Term)
+		logs.Debug("%v request vote recv args[%v] found higher term", rf.toString(), args.toString())
 		rf.currentTerm = args.Term
 		rf.role = RoleFollower
 		rf.votedFor = -1
@@ -213,20 +219,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// 是否已经投票
 	if rf.votedFor != -1 {
-		logs.Debug("%v request vote from[%v] but voted for[%v]", rf.toString(), args.CandidateId, rf.votedFor)
+		logs.Debug("%v request vote recv args[%v] but voted", rf.toString(), args.toString())
 		return
 	}
 
 	// 检查任期
 	if args.Term < rf.currentTerm {
-		logs.Debug("%v request vote from[%v] but term lower", rf.toString(), args.CandidateId)
+		logs.Debug("%v request vote recv args[%v] but term too low", rf.toString(), args.toString())
 		return
 	}
 
 	// 检查日志
 	if args.LastLogTerm < rf.lastLogTerm() ||
 		(args.LastLogTerm == rf.lastLogTerm() && args.LastLogIndex < rf.lastLogIndex()) {
-		logs.Debug("%v request vote from[%v] but log too old", rf.toString(), args.CandidateId)
+		logs.Debug("%v request vote recv args[%v] but not up to date", rf.toString(), args.toString())
 		return
 	}
 
@@ -244,6 +250,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 处理任期
 	reply.Term = rf.currentTerm
 	if args.Term > rf.currentTerm {
+		logs.Debug("%v append entries recv args[%+v] found higher term", rf.toString(), args.toString())
 		rf.currentTerm = args.Term
 		rf.role = RoleFollower
 		rf.votedFor = -1
@@ -251,6 +258,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 检查任期
 	if args.Term < rf.currentTerm {
+		logs.Debug("%v append entries recv args[%+v] but term too low", rf.toString(), args.toString())
 		return
 	}
 
@@ -259,11 +267,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.currentTerm = args.Term
 	rf.leaderId = args.LeaderId
 	rf.heartbeat = time.Now().UnixMilli()
-	logs.Debug("%v follow server[%v]", rf.toString(), rf.leaderId)
+	logs.Debug("%v append entries recv args[%+v] follow", rf.toString(), args.toString())
 
 	// 检查前一条日志是否存在
 	if args.PrevLogIndex > len(rf.logs) {
-		logs.Debug("%v append entries pre log index[%v] not found", rf.toString(), args.PrevLogIndex)
+		logs.Debug("%v append entries recv args[%+v] pre log not found", rf.toString(), args.toString())
 		return
 	}
 
@@ -271,14 +279,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex-1].Term {
 		// 删除并返回错误
 		rf.logs = rf.logs[:args.PrevLogIndex-1]
-		logs.Debug("%v append entries pre log index[%v] term[%v] check fail", rf.toString(), args.PrevLogIndex, args.PrevLogTerm)
+		logs.Debug("%v append entries recv args[%+v] pre log different", rf.toString(), args.toString())
 		return
 	}
 
 	// 开始复制
 	reply.Ok = true
 	rf.logs = append(rf.logs[:args.PrevLogIndex], args.Entries...)
-	logs.Debug("%v append entries pre log index[%v] term[%v] append done", rf.toString(), args.PrevLogIndex, args.PrevLogTerm)
+	logs.Debug("%v append entries recv args[%+v] begin replicate", rf.toString(), args.toString())
 
 	// 向后移动commit
 	if args.LeaderCommit > rf.commitIndex {
@@ -295,7 +303,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				CommandIndex: rf.commitIndex,
 			}
 		}
-		logs.Debug("%v commit index[%v]", rf.toString(), commitIndex)
+		logs.Debug("%v append entries recv args[%+v] commit[%v]", rf.toString(), args.toString(), rf.commitIndex)
 	}
 }
 
@@ -540,8 +548,10 @@ func (rf *Raft) OnAppendEntriesToServer(server int, cnt *int, index int) {
 		}
 		rf.mu.RUnlock()
 
+		logs.Debug("%v on append entries to server[%v] args[%v] index[%v] begin", rf.toString(), server, args.toString(), index)
 		var reply AppendEntriesReply
 		ok := rf.sendAppendEntries(server, &args, &reply)
+		logs.Debug("%v on append entries to server[%v] args[%v] index[%v] ok[%v]", rf.toString(), server, args.toString(), index, ok)
 		if !ok {
 			return
 		}
@@ -566,26 +576,34 @@ func (rf *Raft) AppendEntriesToServerHandleReply(server int, cnt *int, index int
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.role = RoleFollower
+		logs.Debug("%v on append entries to server[%v] args[%v] index[%v] check found higher term", rf.toString(), server, args.toString(), index)
 		return false
 	}
 
-	// 角色和任期是否调整
+	// 检查状态
 	if rf.role != RoleLeader ||
-		rf.currentTerm != args.Term {
+		rf.currentTerm != args.Term ||
+		rf.commitIndex != args.LeaderCommit {
+		logs.Debug("%v on append entries to server[%v] args[%v] index[%v] check state modified", rf.toString(), server, args.toString(), index)
 		return false
 	}
 
 	// 检查是否复制
 	if !reply.Ok {
+		logs.Debug("%v on append entries to server[%v] args[%v] index[%v] check replicate fail", rf.toString(), server, args.toString(), index)
 		return true
 	}
+	logs.Debug("%v on append entries to server[%v] args[%v] index[%v] check replicate success", rf.toString(), server, args.toString(), index)
 
 	// 复制成功
-	*cnt++
 	rf.nextIndex[server] = index + 1
 	rf.matchIndex[server] = index
 
 	// 检查是否可以提交
+	if *cnt == -1 {
+		return false
+	}
+	*cnt++
 	if *cnt <= len(rf.peers)/2 {
 		return false
 	}
@@ -599,7 +617,8 @@ func (rf *Raft) AppendEntriesToServerHandleReply(server int, cnt *int, index int
 			CommandIndex: rf.commitIndex,
 		}
 	}
-	logs.Debug("%v append commit index[%v]", rf.toString(), index)
+	*cnt = -1
+	logs.Debug("%v on append entries to server[%v] args[%v] index[%v] commit[%v]", rf.toString(), server, args.toString(), index, rf.commitIndex)
 	return false
 }
 
@@ -616,11 +635,11 @@ func (rf *Raft) lastLogTerm() int {
 }
 
 func (rf *Raft) toString() string {
-	vs := make([]string, len(rf.logs))
-	for i, v := range rf.logs {
-		vs[i] = fmt.Sprintf("%v:%v:%v", i+1, v.Term, v.Cmd)
-	}
-	return fmt.Sprintf("SRV[%v]\tROLE[%v]\tTERM[%v]\tCOMMIT[%v]\tLOG[%v]\t", rf.me, rf.role, rf.currentTerm, rf.commitIndex, strings.Join(vs, ","))
+	//vs := make([]string, len(rf.logs))
+	//for i, v := range rf.logs {
+	//	vs[i] = fmt.Sprintf("%v:%v:%v", i+1, v.Term, v.Cmd)
+	//}
+	return fmt.Sprintf("SRV[%v] ROLE[%v] TERM[%v] COMMIT[%v] LI[%v] LT[%v]", rf.me, rf.role, rf.currentTerm, rf.commitIndex, rf.lastLogIndex(), rf.lastLogTerm())
 }
 
 // the service or tester wants to create a Raft server. the ports

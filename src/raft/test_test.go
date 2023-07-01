@@ -904,9 +904,12 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
+		logs.Debug("test figure8 unrealiable it[%v] nup[%v] begin", iters, nup)
 		if iters == 200 {
 			cfg.setlongreordering(true)
+			logs.Debug("test figure8 unrealiable it[%v] nup[%v] set log reordering", iters, nup)
 		}
+
 		leader := -1
 		for i := 0; i < servers; i++ {
 			_, _, ok := cfg.rafts[i].Start(rand.Int() % 10000)
@@ -914,18 +917,24 @@ func TestFigure8Unreliable2C(t *testing.T) {
 				leader = i
 			}
 		}
+		logs.Debug("test figure8 unrealiable it[%v] nup[%v] leader[%v], after start all", iters, nup, leader)
 
 		if (rand.Int() % 1000) < 100 {
 			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
+			logs.Debug("test figure8 unrealiable it[%v] nup[%v] leader[%v], begin sleep[%v]", iters, nup, leader, ms)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
+			logs.Debug("test figure8 unrealiable it[%v] nup[%v] leader[%v], after sleep[%v]", iters, nup, leader, ms)
 		} else {
 			ms := (rand.Int63() % 13)
+			logs.Debug("test figure8 unrealiable it[%v] nup[%v] leader[%v], begin sleep[%v]", iters, nup, leader, ms)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
+			logs.Debug("test figure8 unrealiable it[%v] nup[%v] leader[%v], after sleep[%v]", iters, nup, leader, ms)
 		}
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
 			cfg.disconnect(leader)
 			nup -= 1
+			logs.Debug("test figure8 unrealiable it[%v] nup[%v] leader[%v], disconnect leader", iters, nup, leader)
 		}
 
 		if nup < 3 {
@@ -933,8 +942,10 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			if cfg.connected[s] == false {
 				cfg.connect(s)
 				nup += 1
+				logs.Debug("test figure8 unrealiable it[%v] nup[%v] leader[%v], reconnect[%v]", iters, nup, leader, s)
 			}
 		}
+		logs.Debug("test figure8 unrealiable it[%v] nup[%v] leader[%v]", iters, nup, leader)
 	}
 
 	for i := 0; i < servers; i++ {
