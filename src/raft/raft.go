@@ -453,11 +453,22 @@ func (rf *Raft) OnElectionTicker() {
 }
 
 func (rf *Raft) OnElectionToServer(server int, cnt *int, args RequestVoteArgs) {
+	rf.mu.RLock()
+	// 验证状态, 防止临界区外修改
+	if rf.role != RoleCandidate ||
+		rf.currentTerm != args.Term {
+		rf.mu.RUnlock()
+		return
+	}
+	rf.mu.RUnlock()
+
 	var reply RequestVoteReply
 	ok := rf.sendRequestVote(server, &args, &reply)
 	if !ok {
 		return
 	}
+
+	// 开始验证
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
@@ -469,7 +480,7 @@ func (rf *Raft) OnElectionToServer(server int, cnt *int, args RequestVoteArgs) {
 		logs.Debug("%v request vote to server[%v] found higher term[%v]", rf.toString(), server, reply.Term)
 	}
 
-	// 角色和任期是否调整
+	// 验证状态, 防止临界区外修改
 	if rf.role != RoleCandidate ||
 		rf.currentTerm != args.Term {
 		return
@@ -485,7 +496,7 @@ func (rf *Raft) OnElectionToServer(server int, cnt *int, args RequestVoteArgs) {
 		*cnt++
 		logs.Debug("%v request vote to server[%v] succ", rf.toString(), server)
 	} else {
-		logs.Debug("%v request vote to server[%v] fail", rf.toString(), server)
+		logs.Debug("%v request vote to server[%v] error[%v]", rf.toString(), server, reply.Err)
 		return
 	}
 
@@ -519,9 +530,6 @@ func (rf *Raft) OnAppendEntriesTicker() {
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		LeaderCommit: rf.commitIndex,
-		PrevLogIndex: 0,
-		PrevLogTerm:  -1,
-		Entries:      nil,
 	}
 
 	// 向其他节点复制日志
@@ -530,15 +538,14 @@ func (rf *Raft) OnAppendEntriesTicker() {
 		if server == rf.me {
 			continue
 		}
-		go rf.OnAppendEntriesToServer(server, &cnt, &args, rf.lastLogIndex())
+		go rf.OnAppendEntriesToServer(server, &cnt, args, rf.lastLogIndex())
 	}
 
 }
 
-func (rf *Raft) OnAppendEntriesToServer(server int, cnt *int, args *AppendEntriesArgs, index int) {
+func (rf *Raft) OnAppendEntriesToServer(server int, cnt *int, args AppendEntriesArgs, index int) {
 	for {
-		logs.Debug("%v on append to server handle args[%v] index[%v] begin", rf.toString(), args.toString(), index)
-		isRetry, msg := rf.AppendEntriesToServerHandle(server, cnt, *args, index)
+		isRetry, msg := rf.AppendEntriesToServerHandle(server, cnt, &args, index)
 		logs.Debug("%v on append to server handle args[%v] index[%v] msg[%v]", rf.toString(), args.toString(), index, msg)
 		if !isRetry {
 			break
@@ -546,13 +553,11 @@ func (rf *Raft) OnAppendEntriesToServer(server int, cnt *int, args *AppendEntrie
 	}
 }
 
-func (rf *Raft) AppendEntriesToServerHandle(server int, cnt *int, args AppendEntriesArgs, index int) (bool, string) {
+func (rf *Raft) AppendEntriesToServerHandle(server int, cnt *int, args *AppendEntriesArgs, index int) (bool, string) {
 	rf.mu.RLock()
 
 	// 验证状态, 防止临界区外修改
 	if rf.role != RoleLeader ||
-		rf.currentTerm != args.Term ||
-		//rf.commitIndex != args.LeaderCommit ||
 		rf.lastLogIndex() < index {
 		rf.mu.RUnlock()
 		return false, "state modified"
@@ -564,6 +569,7 @@ func (rf *Raft) AppendEntriesToServerHandle(server int, cnt *int, args AppendEnt
 		rf.mu.RUnlock()
 		return false, "state modified"
 	}
+	args.PrevLogTerm = -1
 	if args.PrevLogIndex > 0 {
 		args.PrevLogTerm = rf.logs[args.PrevLogIndex-1].Term
 	}
@@ -571,7 +577,7 @@ func (rf *Raft) AppendEntriesToServerHandle(server int, cnt *int, args AppendEnt
 	rf.mu.RUnlock()
 
 	var reply AppendEntriesReply
-	ok := rf.sendAppendEntries(server, &args, &reply)
+	ok := rf.sendAppendEntries(server, args, &reply)
 	if !ok {
 		return true, "network invalid"
 	}
@@ -590,8 +596,6 @@ func (rf *Raft) AppendEntriesToServerHandle(server int, cnt *int, args AppendEnt
 
 	// 验证状态, 防止临界区外修改
 	if rf.role != RoleLeader ||
-		rf.currentTerm != args.Term ||
-		//rf.commitIndex != args.LeaderCommit ||
 		rf.lastLogIndex() < index {
 		return false, "state modified"
 	}
@@ -629,6 +633,8 @@ func (rf *Raft) AppendEntriesToServerHandle(server int, cnt *int, args AppendEnt
 				CommandIndex: rf.commitIndex,
 			}
 		}
+		// 周知
+		go rf.OnAppendEntriesTicker()
 		return false, fmt.Sprintf("replicate index[%v] succcess and commit index[%v] success", index, rf.commitIndex)
 	}
 
