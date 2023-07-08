@@ -497,12 +497,6 @@ func (rf *Raft) OnElectionToServer(server int, cnt *int) {
 }
 
 func (rf *Raft) OnAppendEntriesTicker() {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	// 验证状态
-	if rf.role != RoleLeader {
-		return
-	}
 	for server := range rf.peers {
 		if server == rf.me {
 			continue
@@ -523,6 +517,11 @@ func (rf *Raft) OnAppendEntriesToServer(server int) {
 
 func (rf *Raft) AppendEntriesToServerHandle(server int) bool {
 	rf.mu.RLock()
+	// 检查状态
+	if rf.role != RoleLeader {
+		rf.mu.RUnlock()
+		return false
+	}
 	// 检查前一个是否越界
 	if rf.nextIndex[server]-1 > rf.lastLogIndex() {
 		rf.nextIndex[server]--
