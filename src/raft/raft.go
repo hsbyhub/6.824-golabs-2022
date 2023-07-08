@@ -270,7 +270,6 @@ func (rf *Raft) appendEntries(args *AppendEntriesArgs) string {
 	rf.currentTerm = args.Term
 	rf.leaderId = args.LeaderId
 	rf.heartbeat = time.Now().UnixMilli()
-	logs.Debug("%v append entries recv args[%+v] follow", rf.toString(), args.toString())
 
 	// 检查前一条日志是否存在
 	if args.PrevLogIndex > len(rf.logs) {
@@ -302,7 +301,6 @@ func (rf *Raft) appendEntries(args *AppendEntriesArgs) string {
 				CommandIndex: rf.commitIndex,
 			}
 		}
-		logs.Debug("%v append entries recv args[%+v] commit[%v]", rf.toString(), args.toString(), rf.commitIndex)
 	}
 
 	return ""
@@ -423,7 +421,6 @@ func (rf *Raft) OnElectionTicker() {
 	// 检查是否任期过期
 	if rf.role == RoleFollower && time.Now().UnixMilli() > rf.heartbeat+HearbeatTimeout {
 		rf.role = RoleCandidate
-		logs.Debug("%v check election timeout", rf.toString())
 	}
 
 	// 检查是否为candidate
@@ -477,7 +474,6 @@ func (rf *Raft) OnElectionToServer(server int, cnt *int, args RequestVoteArgs) {
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.role = RoleFollower
-		logs.Debug("%v request vote to server[%v] found higher term[%v]", rf.toString(), server, reply.Term)
 	}
 
 	// 验证状态, 防止临界区外修改
@@ -494,9 +490,7 @@ func (rf *Raft) OnElectionToServer(server int, cnt *int, args RequestVoteArgs) {
 	// 检查是否获得投票
 	if reply.Err == "" {
 		*cnt++
-		logs.Debug("%v request vote to server[%v] succ", rf.toString(), server)
 	} else {
-		logs.Debug("%v request vote to server[%v] error[%v]", rf.toString(), server, reply.Err)
 		return
 	}
 
@@ -511,75 +505,62 @@ func (rf *Raft) OnElectionToServer(server int, cnt *int, args RequestVoteArgs) {
 		rf.nextIndex[i] = rf.lastLogIndex() + 1
 		rf.matchIndex[i] = 0
 	}
-	logs.Debug("%v get vote[%v] election success", rf.toString(), *cnt)
 	*cnt = -1
 	go rf.OnAppendEntriesTicker()
 }
 
 func (rf *Raft) OnAppendEntriesTicker() {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-
-	// 检查是否为leader
-	if rf.role != RoleLeader {
-		return
-	}
-
-	// 构造请求
-	var args = AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		LeaderCommit: rf.commitIndex,
-	}
-
-	// 向其他节点复制日志
-	cnt := 1
 	for server := range rf.peers {
 		if server == rf.me {
 			continue
 		}
-		go rf.OnAppendEntriesToServer(server, &cnt, args, rf.lastLogIndex())
+		go rf.OnAppendEntriesToServer(server)
 	}
 
 }
 
-func (rf *Raft) OnAppendEntriesToServer(server int, cnt *int, args AppendEntriesArgs, index int) {
+func (rf *Raft) OnAppendEntriesToServer(server int) {
 	for {
-		isRetry, msg := rf.AppendEntriesToServerHandle(server, cnt, &args, index)
-		logs.Debug("%v on append to server handle args[%v] index[%v] msg[%v]", rf.toString(), args.toString(), index, msg)
+		isRetry := rf.AppendEntriesToServerHandle(server)
 		if !isRetry {
 			break
 		}
 	}
 }
 
-func (rf *Raft) AppendEntriesToServerHandle(server int, cnt *int, args *AppendEntriesArgs, index int) (bool, string) {
+func (rf *Raft) AppendEntriesToServerHandle(server int) bool {
 	rf.mu.RLock()
 
-	// 验证状态, 防止临界区外修改
-	if rf.role != RoleLeader ||
-		rf.lastLogIndex() < index {
+	// 验证状态
+	if rf.role != RoleLeader {
 		rf.mu.RUnlock()
-		return false, "state modified"
+		return false
 	}
-
-	// 构造请求
-	args.PrevLogIndex = rf.nextIndex[server] - 1
-	if args.PrevLogIndex > index {
+	// 检查前一个是否越界
+	if rf.nextIndex[server]-1 > rf.lastLogIndex() {
+		rf.nextIndex[server]--
 		rf.mu.RUnlock()
-		return false, "state modified"
+		return true
+	}
+	// 构造请求
+	var args = AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		LeaderCommit: rf.commitIndex,
+		PrevLogIndex: rf.nextIndex[server] - 1,
+		PrevLogTerm:  -1,
+		Entries:      rf.logs[rf.nextIndex[server]-1 : rf.lastLogIndex()],
 	}
 	args.PrevLogTerm = -1
 	if args.PrevLogIndex > 0 {
 		args.PrevLogTerm = rf.logs[args.PrevLogIndex-1].Term
 	}
-	args.Entries = rf.logs[args.PrevLogIndex:index]
 	rf.mu.RUnlock()
 
 	var reply AppendEntriesReply
-	ok := rf.sendAppendEntries(server, args, &reply)
+	ok := rf.sendAppendEntries(server, &args, &reply)
 	if !ok {
-		return true, "network invalid"
+		return true
 	}
 
 	// 开始验证
@@ -591,37 +572,35 @@ func (rf *Raft) AppendEntriesToServerHandle(server int, cnt *int, args *AppendEn
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.role = RoleFollower
-		return false, "found higher term"
-	}
-
-	// 验证状态, 防止临界区外修改
-	if rf.role != RoleLeader ||
-		rf.lastLogIndex() < index {
-		return false, "state modified"
+		return false
 	}
 
 	// 检查是否复制
 	if reply.Err != "" {
 		if rf.nextIndex[server] > 1 {
 			rf.nextIndex[server]--
-			return true, fmt.Sprintf("replicate error[%v]", reply.Err)
 		}
-		return false, fmt.Sprintf("replicate error[%v]", reply.Err)
+		return true
 	}
 
 	// 复制成功
+	index := args.PrevLogIndex + len(args.Entries)
 	rf.nextIndex[server] = index + 1
 	rf.matchIndex[server] = index
 
 	// 检查是否可以提交
-	if *cnt == -1 {
-		return false, "replicate success and alreay commit"
+	cnt := 1
+	for i, match := range rf.matchIndex {
+		if i == rf.me {
+			continue
+		}
+		if match >= index {
+			cnt++
+		}
 	}
-	*cnt++
-	if *cnt <= len(rf.peers)/2 {
-		return false, fmt.Sprintf("replicate success and count[%v] not enough", *cnt)
+	if cnt <= len(rf.peers)/2 {
+		return false
 	}
-	*cnt = -1
 
 	// 提交
 	if rf.commitIndex < index {
@@ -633,12 +612,10 @@ func (rf *Raft) AppendEntriesToServerHandle(server int, cnt *int, args *AppendEn
 				CommandIndex: rf.commitIndex,
 			}
 		}
-		// 周知
 		go rf.OnAppendEntriesTicker()
-		return false, fmt.Sprintf("replicate index[%v] succcess and commit index[%v] success", index, rf.commitIndex)
 	}
 
-	return false, fmt.Sprintf("replicate index[%v] succcess", index)
+	return false
 }
 
 func (rf *Raft) lastLogIndex() int {

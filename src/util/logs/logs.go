@@ -28,7 +28,7 @@ var levelStr = map[Level]string{
 	LevelFatal: "FATAL",
 }
 
-const globalLevel = LevelInfo
+const globalLevel = LevelDebug
 
 func print(level Level, format string, vs ...interface{}) {
 	if level < globalLevel {
