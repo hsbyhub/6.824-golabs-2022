@@ -432,30 +432,24 @@ func (rf *Raft) OnElectionTicker() {
 	rf.currentTerm++
 	rf.votedFor = rf.me
 
+	cnt := 1
+	for server := range rf.peers {
+		if server == rf.me {
+			continue
+		}
+		go rf.OnElectionToServer(server, &cnt)
+	}
+}
+
+func (rf *Raft) OnElectionToServer(server int, cnt *int) {
+	rf.mu.RLock()
+
 	// 构造请求
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
 		LastLogIndex: rf.lastLogIndex(),
 		LastLogTerm:  rf.lastLogTerm(),
-	}
-
-	cnt := 1
-	for server := range rf.peers {
-		if server == rf.me {
-			continue
-		}
-		go rf.OnElectionToServer(server, &cnt, args)
-	}
-}
-
-func (rf *Raft) OnElectionToServer(server int, cnt *int, args RequestVoteArgs) {
-	rf.mu.RLock()
-	// 验证状态, 防止临界区外修改
-	if rf.role != RoleCandidate ||
-		rf.currentTerm != args.Term {
-		rf.mu.RUnlock()
-		return
 	}
 	rf.mu.RUnlock()
 
@@ -470,15 +464,11 @@ func (rf *Raft) OnElectionToServer(server int, cnt *int, args RequestVoteArgs) {
 	defer rf.mu.Unlock()
 	defer rf.persist()
 
-	// 检查任期
+	// 处理任期
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.role = RoleFollower
-	}
-
-	// 验证状态, 防止临界区外修改
-	if rf.role != RoleCandidate ||
-		rf.currentTerm != args.Term {
+		rf.votedFor = -1
 		return
 	}
 
@@ -568,10 +558,11 @@ func (rf *Raft) AppendEntriesToServerHandle(server int) bool {
 	defer rf.mu.Unlock()
 	defer rf.persist()
 
-	// 检查任期
+	// 处理任期
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.role = RoleFollower
+		rf.votedFor = -1
 		return false
 	}
 
